@@ -1,6 +1,7 @@
-import { readFileSync } from 'node:fs'
+import { Database } from 'bun:sqlite'
+import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, isAbsolute, join } from 'node:path'
 import type { Harness } from '../sdk/index'
 
 const home = homedir()
@@ -23,10 +24,42 @@ const apiKey = (value: any) => ['api', 'api_key'].includes(value?.type) && strin
 const oauth = (value: any) => value?.type === 'oauth' && string(value.access) && string(value.refresh) && Number.isInteger(value.expires) && value.expires >= 0
 const shared = new Set(['openai', 'anthropic', 'google', 'xai', 'mistral', 'groq', 'cerebras', 'deepseek', 'openrouter', 'nvidia'])
 
+function readAuth(harness: Harness, file: string) {
+    if (harness === 'opencode') {
+        const name = process.env.OPENCODE_DB ?? 'opencode.db'
+        const path = isAbsolute(name) ? name : join(dirname(file), name)
+        if (existsSync(path)) {
+            let db: Database | undefined
+            try {
+                db = new Database(path, { readonly: true })
+                if (db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'credential'").get()) {
+                    const rows = db.query<{ integration_id: string, value: string }, []>(
+                        'SELECT integration_id, value FROM credential WHERE integration_id IS NOT NULL ORDER BY active, time_created, id').all()
+                    const data = Object.fromEntries(rows.map(row => {
+                        const value = JSON.parse(row.value)
+                        return [row.integration_id, { ...value, type: value.type === 'key' ? 'api' : value.type,
+                            metadata: Object.fromEntries(Object.entries({ ...value.metadata, ...value.configuration }).filter(([, item]) => typeof item === 'string')),
+                            accountId: value.metadata?.accountId ?? value.accountId, enterpriseUrl: value.metadata?.enterpriseUrl ?? value.enterpriseUrl }]
+                    }))
+                    return { data, path }
+                }
+            } catch { throw new Error(`${path}: cannot read OpenCode credentials`) }
+            finally { db?.close() }
+        }
+    }
+    let content: string
+    try { content = readFileSync(file, 'utf8') }
+    catch (error) { throw new Error(`${file}: ${(error as NodeJS.ErrnoException).code ?? 'unreadable'}`) }
+    try { return { data: JSON.parse(content), path: file } }
+    catch { throw new Error(`${file}: invalid JSON`) }
+}
+
 function decode(harness: Harness, data: any): Record<string, any> {
     if (!data || typeof data !== 'object' || Array.isArray(data)) return {}
     if (harness !== 'codex') return Object.fromEntries(Object.entries(data)
-        .filter(([, value]: [string, any]) => apiKey(value) || oauth(value) || harness === 'opencode' && value?.type === 'wellknown' && string(value.key) && string(value.token)).map(([provider, value]: [string, any]) => [
+        .filter(([, value]: [string, any]) => apiKey(value) || oauth(value) || harness === 'opencode' && (
+            value?.type === 'oauth' && typeof value.access === 'string' && typeof value.refresh === 'string' && Number.isInteger(value.expires) && value.expires >= 0 ||
+            value?.type === 'wellknown' && string(value.key) && string(value.token))).map(([provider, value]: [string, any]) => [
             provider === 'openai' && value.type === 'oauth' ? 'openai-codex' : provider,
             apiKey(value) ? { ...value, type: 'api_key' } : value
         ]))
@@ -42,10 +75,10 @@ function decode(harness: Harness, data: any): Record<string, any> {
 
 function encode(target: Harness, source: Harness, data: any, credentials: Record<string, any>) {
     const entries = Object.entries(credentials).filter(([provider, value]) => target === source || apiKey(value) && shared.has(provider) || provider === 'openai-codex')
+    if (target === source && entries.length) return data
     if (target === 'codex') {
         const token = credentials['openai-codex']
         const key = credentials.openai
-        if (target === source && entries.length) return data
         if (oauth(token) && Number.isFinite(claims(token.access).exp) && string(token.accountId ?? claims(token.access)['https://api.openai.com/auth']?.chatgpt_account_id)) {
             return { auth_mode: 'chatgpt', tokens: { access_token: token.access, refresh_token: token.refresh,
                 id_token: string(token.idToken) ? token.idToken : token.access, account_id: token.accountId ?? claims(token.access)['https://api.openai.com/auth'].chatgpt_account_id } }
@@ -63,16 +96,19 @@ export function resolveAuth(harness: Harness, profile = 'default') {
     const names = profile === 'default'
         ? [harness, ...Object.keys(auths).filter(name => name !== harness)] : [profile]
     if (profile !== 'default' && !Object.hasOwn(auths, profile)) fail(`Unknown auth profile: ${profile}`)
+    const problems: string[] = []
     for (const name of names) {
         const source = auths[name]!
-        let data: any
-        try { data = JSON.parse(readFileSync(source.file, 'utf8')) } catch { continue }
+        let loaded: ReturnType<typeof readAuth>
+        try { loaded = readAuth(source.harness, source.file) }
+        catch (error) { problems.push(`${name}: ${(error as Error).message}`); continue }
+        const { data, path } = loaded
         const credentials = decode(source.harness, data)
         const converted = encode(harness, source.harness, data, credentials)
-        if (!converted) continue
+        if (!converted) { problems.push(`${name}: ${path}: no compatible saved credentials for ${harness}`); continue }
         const providers = Object.keys(converted)
         return { name, data: converted, destination: destinations[harness],
             provider: providers.includes('openai') ? 'openai' : providers[0] }
     }
-    return fail(profile === 'default' ? `No compatible credentials found for ${harness}. Checked its own auth file, then other harness auth files.` : `Auth profile ${profile} has no compatible credentials for ${harness}`)
+    return fail(`No compatible credentials found for ${harness}. ${problems.join('; ')}`)
 }
