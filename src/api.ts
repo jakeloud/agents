@@ -17,7 +17,7 @@ const turn = t.Object({
     status: t.String({ enum: ['running', 'completed', 'failed', 'interrupted'], description: 'running: harness executing; completed: successful terminal event and process exit; failed: invocation or model failure; interrupted: server stopped during execution.' }),
     text: t.String({ description: 'Latest completed assistant message as plain text. Empty before a message completes.' }),
     events: t.Array(t.Ref('Event'), { description: 'SDK events in arrival order. Switch on type to read the corresponding documented fields. Tool snapshots replace earlier snapshots with the same id; usage and plan events replace previous totals and plans. Poll get to see progress.' }),
-    usage: t.Ref('TokenUsage', { description: 'Token totals for this turn, including all its model requests. Unavailable counters are null.' }),
+    usage: { ...eventModels.TokenUsage, description: 'Token totals for this turn, including all its model requests. Unavailable counters are null.' },
     error: t.Optional(t.String({ description: 'Failure or interruption detail. Absent on successful turns.' }))
 }, {
     additionalProperties: false,
@@ -68,7 +68,7 @@ export const models = {
     Environments: t.Array(t.Object({
         ...environmentFields,
         threadId
-    }, { description: 'Environment summary. Thread history and Docker inspect state are available through get.' }), { description: 'All environments managed by this server, including busy and interrupted environments. Empty array when none exist.' }),
+    }, { description: 'Environment summary. Conversation history and container state are available through get.' }), { description: 'All environments managed by this server, including busy and interrupted environments. Empty array when none exist.' }),
     EnvironmentState: t.Object({ ...environment.properties, container }, { description: 'Environment metadata, current thread history and actual Docker runtime state.' }),
     Error: t.Object({ error: t.String({ description: 'Human-readable error detail. The HTTP status identifies the error category.', examples: ['Environment not found'] }) }, { description: 'API error response.' })
 }
@@ -122,7 +122,7 @@ export const routes = {
         params,
         detail: {
             operationId: 'deleteEnvironment', summary: 'Delete an environment',
-            description: 'Forcibly removes the Docker container and its anonymous volumes, workspace, credentials and native sessions, then removes the server’s record. Rejects creating, running and deleting environments with 409. Can clean up interrupted or failed environments. A container already missing from Docker still has its record removed.',
+            description: 'Removes the container, workspace, credentials and conversation, then removes the server’s record. Rejects creating, running and deleting environments with 409. Can clean up interrupted or failed environments. A container already missing from Docker still has its record removed.',
             responses: { 204: { description: 'Environment deleted. No response body.' }, 404: errors[404], 409: errors[409], 422: errors[422], 500: errors[500], 502: errors[502] }
         }
     }

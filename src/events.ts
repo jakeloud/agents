@@ -10,10 +10,11 @@ const usageFields = {
     reasoningOutputTokens: count('Reasoning tokens, included in outputTokens. Null when not reported.')
 }
 const status = t.Union(['running', 'completed', 'failed', 'interrupted'].map(value => t.Literal(value)))
+const jsonValue = t.Unsafe<Json>(t.Union([t.Null(), t.Boolean(), t.Number(), t.String(), t.Array(t.Ref('JsonValue')), t.Record(t.String(), t.Ref('JsonValue'))], { description: 'A JSON value: null, boolean, number, string, an array of JSON values, or an object of JSON values.' }))
 const content = t.Union([
     t.Object({ type: t.Literal('text'), text: t.String({ description: 'Text output.' }) }, { additionalProperties: false }),
     t.Object({ type: t.Literal('image'), mimeType: t.String({ description: 'Image MIME type.' }), data: t.String({ description: 'Base64 image bytes.' }) }, { additionalProperties: false }),
-    t.Object({ type: t.Literal('json'), value: t.Ref('JsonValue', { description: 'Structured tool result.' }) }, { additionalProperties: false })
+    t.Object({ type: t.Literal('json'), value: { ...jsonValue, description: 'Structured tool result.' } }, { additionalProperties: false })
 ])
 const variants = {
     MessageEvent: t.Object({ type: t.Literal('message'), text: t.String({ description: 'Completed assistant message.' }) }, { additionalProperties: false }),
@@ -23,7 +24,7 @@ const variants = {
         id: t.String({ description: 'Tool call identifier. Later snapshots with this ID replace earlier ones within this turn.' }),
         name: t.String({ description: 'Tool name, such as shell, read_file, write_file, edit_file, edit_files, search_files, find_files, list_files or search_web. Integrations may define other tool names.' }),
         status: t.Union([t.Literal('running'), t.Literal('completed'), t.Literal('failed')], { description: 'Current tool execution status.' }),
-        input: t.Ref('JsonValue', { description: 'Tool arguments as JSON. Shell calls use {command}; file operations use paths and file contents; integrations define their own arguments.' }),
+        input: { ...jsonValue, description: 'Tool arguments as JSON. Shell calls use {command}; file operations use paths and file contents; integrations define their own arguments.' },
         output: t.Array(content, { description: 'Latest complete tool output snapshot. Replace the previous output; do not append snapshots.' }),
         exitCode: t.Nullable(t.Integer(), { description: 'Process exit code when known; otherwise null.' }),
         error: t.Nullable(t.String(), { description: 'Tool failure detail, or null.' })
@@ -34,7 +35,7 @@ const variants = {
     StatusEvent: t.Object({ type: t.Literal('status'), status: { ...status, description: 'API turn lifecycle state.' } }, { additionalProperties: false })
 }
 export const eventModels = {
-    JsonValue: t.Unsafe<Json>(t.Union([t.Null(), t.Boolean(), t.Number(), t.String(), t.Array(t.Ref('JsonValue')), t.Record(t.String(), t.Ref('JsonValue'))], { description: 'A JSON value: null, boolean, number, string, an array of JSON values, or an object of JSON values.' })),
+    JsonValue: jsonValue,
     ...variants,
     Event: t.Union(Object.keys(variants).map(name => t.Ref(name)), { description: 'SDK event. The type field selects the documented shape.', discriminator: { propertyName: 'type' } }),
     TokenUsage: t.Object(usageFields, { additionalProperties: false, description: 'Token totals for one API turn. Null means a counter is unavailable, not zero.' })
