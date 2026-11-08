@@ -1,6 +1,7 @@
 {
   "name": "agents",
-  "module": "index.ts",
+  "module": "sdk/index.js",
+  "exports": "./sdk/index.js",
   "type": "module",
   "private": true,
   "devDependencies": {
@@ -10,13 +11,12 @@
     "typescript": "^7.0.2"
   },
   "dependencies": {
-    "@elysia/openapi": "^2.0.0-rc.1",
     "elysia": "^2.0.0-rc.3"
   },
   "scripts": {
     "dev": "bun --watch src/index.ts",
     "build": "bun build src/index.ts --target bun --outdir ./dist",
-    "start": "NODE_ENV=production bun dist/index.js",
-    "test": "bun test"
+    "start": "bun src/index.ts",
+    "example": "bun example/simple.js"
   }
 }
