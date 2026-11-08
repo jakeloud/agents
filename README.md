@@ -2,7 +2,7 @@
 
 One Docker container, one Codex thread. Bun + Elysia. A small HTTP server and a fetch-based JavaScript SDK.
 
-On the server machine, install Bun and Docker and put a file-backed Codex login at `~/.codex/auth.json`. The server copies `auth.json` and, if present, `config.toml` into each container. Named auth profiles are paths in `auths` at the top of `src/index.ts`; add more there. Credentials stored only in an OS keychain need a file-backed login first.
+On the server machine, install Bun and Docker and put a file-backed Codex login at `~/.codex/auth.json`. The `default` auth profile means the server user's `~/.codex` directory; omitting `auth` selects it too. The server copies `auth.json` and, if present, `config.toml` into each container. Named auth profiles are paths in `auths` at the top of `src/index.ts`; add more there. Credentials stored only in an OS keychain need a file-backed login first.
 
 ```sh
 bun install
@@ -37,13 +37,13 @@ await env.delete()
 
 | Method | Path | Body / result |
 | --- | --- | --- |
-| POST | `/environments` | `{ harness?: "codex", auth?: "default", image?: "node:24-bookworm" }` → environment (201) |
+| POST | `/environments` | `{ harness?: "codex", auth?: "default", image?: "node:24-bookworm-slim" }` → environment (201) |
 | GET | `/environments` | Environment summaries with thread IDs |
 | GET | `/environments/:id` | Environment, Docker state, thread ID and turns |
 | POST | `/environments/:id/messages` | `{ message, model }` → completed turn with `text` and raw Codex `events` |
 | DELETE | `/environments/:id` | Remove container and stored state (204) |
 
-Creation starts the selected base image and installs `@openai/codex` inside it. Custom images need Linux, Node/npm, `sleep`, and normal shell utilities; execution uses root with `/workspace` as its working directory. The default is `node:24-bookworm`. The copied Codex config must work inside the container; host paths are not rewritten. No host workspace or Docker socket is mounted, and no container ports are published. Codex runs with approvals and its inner sandbox disabled inside the container.
+Creation starts the selected base image and installs `@openai/codex` inside it, then clears npm's cache. The default is `node:24-bookworm-slim`, with only Git and CA certificates added and apt's package lists removed. Custom images need Linux, Node/npm, `sleep`, normal shell utilities, and CA certificates; execution uses root with `/workspace` as its working directory. The copied Codex config must work inside the container; host paths are not rewritten. No host workspace or Docker socket is mounted, and no container ports are published. Codex runs with approvals and its inner sandbox disabled inside the container.
 
 Messages wait for completion. Poll `env.get()` from another caller for events during a turn. A busy environment rejects another send or deletion with 409. Independent environments can run in parallel. Errors return `{ error }`; the SDK throws an error with an HTTP `status`. Failed turns remain in thread history and can be retried.
 

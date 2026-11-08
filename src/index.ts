@@ -6,7 +6,7 @@ import { createInterface } from 'node:readline'
 import { Readable } from 'node:stream'
 
 const auths: Record<string, string> = { default: join(homedir(), '.codex') }
-const image = 'node:24-bookworm'
+const image = 'node:24-bookworm-slim'
 const file = 'environments.json'
 
 type Turn = {
@@ -72,7 +72,9 @@ async function create(options: { harness?: 'codex', auth?: string, image?: strin
             '--workdir', '/workspace', '--env', 'HOME=/root', '--env', 'CODEX_HOME=/root/.codex',
             '--entrypoint', 'sleep', env.image, 'infinity')
         await docker('exec', env.id, 'mkdir', '-p', '/root/.codex')
-        await docker('exec', env.id, 'npm', 'install', '--global', '@openai/codex')
+        if (env.image === image) await docker('exec', env.id, 'sh', '-c',
+            'apt-get update && apt-get install -y --no-install-recommends ca-certificates git && rm -rf /var/lib/apt/lists/*')
+        await docker('exec', env.id, 'sh', '-c', 'npm install --global @openai/codex && npm cache clean --force')
         for (const name of ['auth.json', 'config.toml']) {
             if (name === 'auth.json' || existsSync(join(source, name))) {
                 await docker('cp', join(source, name), `${env.id}:/root/.codex/${name}`)
