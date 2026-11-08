@@ -1,5 +1,7 @@
 import { Elysia } from 'elysia'
 import { docs, models, routes } from './api'
+import { Run } from './events'
+import type { Environment as PublicEnvironment, Turn } from '../sdk/index'
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -10,32 +12,37 @@ const file = 'environments.json'
 const packages = { codex: '@openai/codex', pi: '@earendil-works/pi-coding-agent' }
 type Harness = keyof typeof packages
 
-type Turn = {
-    message: string, model: string, status: string, text: string, events: any[], error?: string
-}
-type Environment = {
-    id: string, harness: Harness, image: string, auth: string, status: string, provider?: string,
-    thread: { id: string | null, turns: Turn[] }, error?: string
-}
+type Environment = PublicEnvironment & { provider?: string }
 
-const environments: Record<string, Environment> = existsSync(file)
-    ? JSON.parse(readFileSync(file, 'utf8')) : {}
+const stored = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : { version: 2, environments: {} }
+const environments: Record<string, Environment> = stored.version === 2 ? stored.environments : stored
 const save = () => {
-    writeFileSync(`${file}.tmp`, JSON.stringify(environments))
+    writeFileSync(`${file}.tmp`, JSON.stringify({ version: 2, environments }))
     renameSync(`${file}.tmp`, file)
 }
 const fail = (status: number, message: string): never => { throw Object.assign(new Error(message), { status }) }
 const get = (id: string) => Object.hasOwn(environments, id) ? environments[id]! : fail(404, 'Environment not found')
+const publicEnvironment = ({ provider, ...env }: Environment): PublicEnvironment => env
 const idle = (env: Environment) => {
     if (['creating', 'running', 'deleting'].includes(env.status)) fail(409, 'Environment is busy')
 }
 
 for (const env of Object.values(environments)) {
+    if (stored.version !== 2) for (const turn of env.thread.turns) {
+        const run = new Run(env.harness)
+        for (const event of turn.events) run.accept(event)
+        run.finish(turn.status, turn.error)
+        turn.events = run.events
+        turn.usage = run.usage
+    }
     if (!['creating', 'running', 'deleting'].includes(env.status)) continue
     env.status = 'interrupted'
     env.error = 'Server stopped during work; delete and recreate this environment'
     const turn = env.thread.turns.at(-1)
-    if (turn?.status === 'running') Object.assign(turn, { status: 'interrupted', error: env.error })
+    if (turn?.status === 'running') {
+        Object.assign(turn, { status: 'interrupted', error: env.error })
+        turn.events.push({ type: 'error', message: env.error }, { type: 'status', status: 'interrupted' })
+    }
 }
 save()
 
@@ -139,7 +146,8 @@ async function create(options: { harness?: Harness, auth?: string, image?: strin
 async function send(id: string, message: string, model: string) {
     const env = get(id)
     if (env.status !== 'ready') fail(409, `Environment is ${env.status}`)
-    const turn: Turn = { message, model, status: 'running', text: '', events: [] }
+    const run = new Run(env.harness)
+    const turn: Turn = { message, model, status: 'running', text: '', events: run.events, usage: run.usage }
     env.thread.turns.push(turn)
     env.status = 'running'
     save()
@@ -155,35 +163,24 @@ async function send(id: string, message: string, model: string) {
         exited = false
         const stderr = new Response(proc.stderr).text()
         for await (const event of events(proc.stdout)) {
-            turn.events.push(event)
-            if (pi) {
-                if (event.type === 'session') env.thread.id = event.id
-                if (event.type === 'message_end' && event.message.role === 'assistant') {
-                    turn.text = event.message.content.filter((part: any) => part.type === 'text').map((part: any) => part.text).join('')
-                    turn.error = ['error', 'aborted', 'length'].includes(event.message.stopReason)
-                        ? event.message.errorMessage || `Pi stopped: ${event.message.stopReason}` : undefined
-                }
-                if (event.type === 'agent_settled' && event.aborted) turn.error = 'Pi run aborted'
-                if (event.type === 'auto_retry_end' && !event.success) turn.error = event.finalError || 'Pi retries exhausted'
-            } else {
-                if (event.type === 'thread.started') env.thread.id = event.thread_id
-                if (event.type === 'item.completed' && event.item.type === 'agent_message') turn.text = event.item.text
-                if (event.type === 'turn.failed') turn.error = event.error?.message ?? 'Codex turn failed'
-            }
+            run.accept(event)
+            if (run.sessionId) env.thread.id = run.sessionId
+            turn.text = run.text
             save()
         }
         const [code, err] = await Promise.all([proc.exited, stderr])
         exited = true
-        if (code || turn.error || !turn.events.some(event => event.type === (pi ? 'agent_settled' : 'turn.completed'))) {
-            fail(502, turn.error || err.trim() || `${env.harness} exited without completing the turn`)
+        if (code || run.error || !run.completed) {
+            fail(502, run.error || err.trim() || 'Agent exited without completing the turn')
         }
         turn.status = 'completed'
         return turn
     } catch (error) {
-        turn.status = 'failed'
-        turn.error = String(error)
+        turn.status = exited ? 'failed' : 'interrupted'
+        turn.error = error instanceof Error ? error.message : String(error)
         throw error
     } finally {
+        run.finish(turn.status, turn.error)
         env.status = exited ? 'ready' : 'interrupted'
         save()
     }
@@ -199,12 +196,18 @@ new Elysia()
     .post('/environments', routes.create, async ({ body, set }) => {
         const env = await create(body)
         set.status = 201
-        return env
+        return publicEnvironment(env)
     })
-    .get('/environments', routes.list, () => Object.values(environments).map(({ thread, ...env }) => ({ ...env, threadId: thread.id })))
-    .get('/environments/:id', routes.get, async ({ params: { id } }) => ({
-        ...get(id), container: JSON.parse(await docker(['inspect', '--format', '{{json .State}}', id]))
-    }))
+    .get('/environments', routes.list, () => Object.values(environments).map(({ provider, thread, ...env }) => ({ ...env, threadId: thread.id })))
+    .get('/environments/:id', routes.get, async ({ params: { id } }) => {
+        const env = get(id)
+        const state = JSON.parse(await docker(['inspect', '--format', '{{json .State}}', id]))
+        return { ...publicEnvironment(env), container: {
+            status: state.Status, running: state.Running, exitCode: state.ExitCode, error: state.Error || null,
+            startedAt: !state.StartedAt || state.StartedAt.startsWith('0001-') ? null : state.StartedAt,
+            finishedAt: !state.FinishedAt || state.FinishedAt.startsWith('0001-') ? null : state.FinishedAt
+        } }
+    })
     .post('/environments/:id/messages', routes.send, ({ params: { id }, body }) => send(id, body.message, body.model))
     .delete('/environments/:id', routes.delete, async ({ params: { id }, set }) => {
         const env = get(id)

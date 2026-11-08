@@ -1,7 +1,7 @@
 import { Agents } from '../sdk/index.js'
 
 const agents = new Agents()
-const agent = await agents.create({ harness: 'codex' })
+const agent = await agents.create()
 
 try {
     const first = await agent.send('Write a small Fibonacci program in js and run it.', {
