@@ -1,5 +1,5 @@
 import { t } from 'elysia'
-import type { AgentEvent, Content, Json, Status, TokenUsage, ToolEvent } from '../sdk/index'
+import type { AgentEvent, Content, Harness, Json, Status, TokenUsage, ToolEvent } from '../sdk/index'
 
 const count = (description: string) => t.Nullable(t.Integer({ minimum: 0 }), { description })
 const usageFields = {
@@ -48,7 +48,7 @@ const contentOf = (blocks: any[] = []): Content[] => blocks.flatMap((block): Con
     if (block.type === 'resource' && typeof block.resource?.text === 'string') return [{ type: 'text', text: block.resource.text }]
     return []
 })
-const toolNames: Record<string, string> = { bash: 'shell', read: 'read_file', write: 'write_file', edit: 'edit_file', grep: 'search_files', find: 'find_files', ls: 'list_files' }
+const toolNames: Record<string, string> = { bash: 'shell', read: 'read_file', write: 'write_file', edit: 'edit_file', grep: 'search_files', find: 'find_files', glob: 'find_files', ls: 'list_files', list: 'list_files', websearch: 'search_web', webfetch: 'fetch_url', codesearch: 'search_code' }
 
 export class Run {
     events: AgentEvent[] = [{ type: 'status', status: 'running' }]
@@ -58,8 +58,10 @@ export class Run {
     error?: string
     completed = false
     tools = new Map<string, ToolEvent>()
+    parts = new Set<string>()
+    pendingText = ''
 
-    constructor(readonly harness: 'codex' | 'pi') {}
+    constructor(readonly harness: Harness) {}
 
     tokens(values: TokenUsage) {
         for (const key of Object.keys(values) as (keyof TokenUsage)[]) {
@@ -77,6 +79,7 @@ export class Run {
     accept(event: any) {
         if (!event || typeof event.type !== 'string') return
         if (this.harness === 'pi') this.pi(event)
+        else if (this.harness === 'opencode') this.opencode(event)
         else this.codex(event)
     }
 
@@ -142,6 +145,38 @@ export class Run {
         if (event.type === 'agent_settled') {
             this.completed = true
             if (event.aborted) this.error = 'Execution aborted'
+        }
+    }
+
+    opencode(event: any) {
+        if (event.sessionID) this.sessionId = event.sessionID
+        if (event.type === 'error') this.error = event.error?.data?.message ?? event.error?.message ?? 'Execution failed'
+        const part = event.part
+        if (!part || this.parts.has(part.id)) return
+        this.parts.add(part.id)
+        if (event.type === 'step_start') this.pendingText = ''
+        if (event.type === 'text') this.pendingText += part.text
+        if (event.type === 'reasoning') this.events.push({ type: 'reasoning', text: part.text })
+        if (event.type === 'tool_use') {
+            const state = part.state
+            const { filePath, oldString, newString, ...input } = state.input ?? {}
+            if (filePath !== undefined) input.path = filePath
+            if (oldString !== undefined) input.oldText = oldString
+            if (newString !== undefined) input.newText = newString
+            this.tool(part.callID, toolNames[part.tool] ?? part.tool, state.status === 'error' ? 'failed' : 'completed', input,
+                state.output ? [{ type: 'text', text: state.output }] : [], state.metadata?.exit ?? state.metadata?.exitCode ?? null, state.error ?? null)
+            if (part.tool === 'todowrite' && state.input?.todos) this.events.push({ type: 'plan', steps: state.input.todos.map((step: any) => ({ text: step.content, completed: step.status === 'completed' })) })
+        }
+        if (event.type === 'step_finish') {
+            if (this.pendingText) {
+                this.text = this.pendingText
+                this.events.push({ type: 'message', text: this.text })
+            }
+            const u = part.tokens
+            if (u) this.tokens({ inputTokens: u.input + (u.cache?.read ?? 0) + (u.cache?.write ?? 0), outputTokens: u.output ?? null,
+                cachedInputTokens: u.cache?.read ?? null, cacheWriteInputTokens: u.cache?.write ?? null, reasoningOutputTokens: u.reasoning ?? null })
+            this.completed = part.reason === 'stop'
+            if (['length', 'content-filter', 'error'].includes(part.reason)) this.error = `Response stopped: ${part.reason}`
         }
     }
 

@@ -4,8 +4,8 @@ import { eventModels } from './events'
 
 const id = t.String({ description: 'Environment container name returned by create or list.', examples: ['agent-123e4567-e89b-42d3-a456-426614174000'] })
 const threadId = t.Nullable(t.String(), { description: 'Thread identifier. Null until the first message starts the conversation.' })
-const harness = t.Union([t.Literal('codex'), t.Literal('pi')], { description: 'Agent CLI installed and executed in this environment.' })
-const auth = t.String({ minLength: 1, description: 'Named server-side Codex credential profile. "default" selects the server user’s ~/.codex. Credentials are copied into the container.', examples: ['default'] })
+const harness = t.Union([t.Literal('codex'), t.Literal('pi'), t.Literal('opencode')], { description: 'Agent CLI to run. OpenCode uses the file-based v1.19.5 CLI.' })
+const auth = t.String({ minLength: 1, description: '"default" prefers the harness’s own auth file, then compatible files in codex, pi, opencode order. Missing, invalid and incompatible files are skipped. An explicit profile name pins the source without fallback. Profiles and native paths are defined in src/auth.ts. Responses report the selected source.', examples: ['default', 'codex', 'pi', 'opencode'] })
 const image = t.String({ minLength: 1, description: 'Docker base image. Custom images need Linux, Node/npm, sleep, shell utilities and CA certificates.', examples: ['node:24-bookworm-slim'] })
 const message = t.String({ minLength: 1, description: 'User message sent to the environment’s conversation.', examples: ['Write a small Fibonacci program and run it.'] })
 const model = t.String({ minLength: 1, description: 'Model ID for this message. Required on every send; changing it keeps the same conversation.', examples: ['gpt-6-luna'] })
@@ -55,8 +55,8 @@ const createBody = t.Object({
     auth: t.Optional({ ...auth, default: 'default' }),
     image: t.Optional({ ...image, default: 'node:24-bookworm-slim' })
 }, {
-    description: 'All fields are optional. Send {} to create Codex with the default auth profile and slim base image.',
-    examples: [{ harness: 'codex', auth: 'default', image: 'node:24-bookworm-slim' }, { harness: 'pi', auth: 'default' }]
+    description: 'All fields are optional. Send {} to create Codex with automatic auth selection and the slim base image.',
+    examples: [{ harness: 'codex', auth: 'default', image: 'node:24-bookworm-slim' }, { harness: 'pi' }, { harness: 'opencode' }]
 })
 
 export const models = {

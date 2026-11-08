@@ -1,16 +1,13 @@
 import { Elysia } from 'elysia'
 import { docs, models, routes } from './api'
 import { Run } from './events'
-import type { Environment as PublicEnvironment, Turn } from '../sdk/index'
+import { resolveAuth } from './auth'
+import type { Environment as PublicEnvironment, Harness, Turn } from '../sdk/index'
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
-import { join } from 'node:path'
 
-const auths: Record<string, string> = { default: join(homedir(), '.codex') }
 const image = 'node:24-bookworm-slim'
 const file = 'environments.json'
-const packages = { codex: '@openai/codex', pi: '@earendil-works/pi-coding-agent' }
-type Harness = keyof typeof packages
+const packages = { codex: '@openai/codex', pi: '@earendil-works/pi-coding-agent', opencode: 'opencode-ai@1.19.5' }
 
 type Environment = PublicEnvironment & { provider?: string }
 
@@ -65,27 +62,6 @@ async function remove(id: string) {
     save()
 }
 
-function piAuth(source: string) {
-    let auth: any
-    try { auth = JSON.parse(readFileSync(join(source, 'auth.json'), 'utf8')) }
-    catch { fail(400, 'Invalid Codex auth.json') }
-    if (auth?.auth_mode !== 'chatgpt' && typeof auth?.OPENAI_API_KEY === 'string' && auth.OPENAI_API_KEY) {
-        return { provider: 'openai', credentials: { openai: { type: 'api_key', key: auth.OPENAI_API_KEY } } }
-    }
-    const tokens = auth?.tokens
-    let claims: any
-    try { claims = JSON.parse(Buffer.from(tokens.access_token.split('.')[1], 'base64url').toString()) }
-    catch { fail(400, 'Pi needs a Codex API key or ChatGPT OAuth login') }
-    const accountId = tokens.account_id || claims?.['https://api.openai.com/auth']?.chatgpt_account_id
-    const expires = claims?.exp * 1000
-    if (typeof tokens.refresh_token !== 'string' || !tokens.refresh_token || typeof accountId !== 'string' || !accountId || !Number.isFinite(expires)) {
-        fail(400, 'Incomplete Codex OAuth login')
-    }
-    return { provider: 'openai-codex', credentials: { 'openai-codex': {
-        type: 'oauth', access: tokens.access_token, refresh: tokens.refresh_token, expires, accountId
-    } } }
-}
-
 async function* events(stream: ReadableStream<Uint8Array>) {
     const decoder = new TextDecoder()
     let buffer = ''
@@ -103,13 +79,10 @@ async function* events(stream: ReadableStream<Uint8Array>) {
 }
 
 async function create(options: { harness?: Harness, auth?: string, image?: string }) {
-    const auth = options.auth ?? 'default'
-    const source = Object.hasOwn(auths, auth) ? auths[auth]! : fail(400, 'Unknown auth profile')
-    if (!existsSync(join(source, 'auth.json'))) fail(400, `Auth profile ${auth} needs auth.json`)
     const harness = options.harness ?? 'codex'
-    const pi = harness === 'pi' ? piAuth(source) : undefined
+    const auth = resolveAuth(harness, options.auth)
     const env: Environment = {
-        id: `agent-${crypto.randomUUID()}`, harness, auth, provider: pi?.provider,
+        id: `agent-${crypto.randomUUID()}`, harness, auth: auth.name, provider: auth.provider,
         image: options.image ?? image, status: 'creating', thread: { id: null, turns: [] }
     }
     environments[env.id] = env
@@ -118,19 +91,16 @@ async function create(options: { harness?: Harness, auth?: string, image?: strin
         await docker(['run', '-d', '--init', '--name', env.id, '--user', '0',
             '--workdir', '/workspace', '--env', 'HOME=/root', '--env', 'CODEX_HOME=/root/.codex',
             '--env', 'PI_CODING_AGENT_DIR=/root/.pi/agent',
+            '--env', 'XDG_DATA_HOME=/root/.local/share',
             '--entrypoint', 'sleep', env.image, 'infinity'])
-        await docker(['exec', env.id, 'mkdir', '-p', '/root/.codex', '/root/.pi/agent'])
+        await docker(['exec', env.id, 'mkdir', '-p', '/root/.codex', '/root/.pi/agent', '/root/.local/share/opencode'])
         if (env.image === image) await docker(['exec', env.id, 'sh', '-c',
             'apt-get update && apt-get install -y --no-install-recommends ca-certificates git && rm -rf /var/lib/apt/lists/*'])
         await docker(['exec', env.id, 'sh', '-c', `npm install --global ${packages[harness]} && npm cache clean --force`])
-        for (const name of ['auth.json', 'config.toml']) {
-            if (name === 'auth.json' || existsSync(join(source, name))) {
-                await docker(['cp', join(source, name), `${env.id}:/root/.codex/${name}`])
-            }
-        }
-        if (pi) await docker(['exec', '-i', env.id, 'node', '-e',
-            'require("node:fs").writeFileSync("/root/.pi/agent/auth.json", require("node:fs").readFileSync(0), { mode: 0o600 })'],
-            new Blob([JSON.stringify(pi.credentials)]))
+        await docker(['exec', '-i', env.id, 'node', '-e',
+            'require("node:fs").writeFileSync(process.argv[1], require("node:fs").readFileSync(0), { mode: 0o600 })', auth.destination],
+            new Blob([JSON.stringify(auth.data)]))
+        if (auth.config && existsSync(auth.config)) await docker(['cp', auth.config, `${env.id}:/root/.codex/config.toml`])
         env.status = 'ready'
         save()
         return env
@@ -153,11 +123,13 @@ async function send(id: string, message: string, model: string) {
     save()
     let exited = true
     try {
-        const pi = env.harness === 'pi'
-        const args = pi
-            ? ['pi', '--mode', 'json', '--provider', env.provider!, '--session-id', env.id, '--model', model]
-            : ['codex', 'exec', ...(env.thread.id ? ['resume', env.thread.id] : []),
-                '--json', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', '--model', model, '-']
+        const args = {
+            pi: ['pi', '--mode', 'json', '--session-id', env.id, '--model', model],
+            codex: ['codex', 'exec', ...(env.thread.id ? ['resume', env.thread.id] : []),
+                '--json', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', '-c', 'cli_auth_credentials_store="file"', '--model', model, '-'],
+            opencode: ['opencode', 'run', '--format', 'json', '--thinking', '--auto', '--model', model.includes('/') ? model : `${env.provider ?? 'openai'}/${model}`,
+                ...(env.thread.id ? ['--session', env.thread.id] : [])]
+        }[env.harness]
         const proc = Bun.spawn(['docker', 'exec', '-i', env.id, ...args],
             { stdin: new Blob([message]), stdout: 'pipe', stderr: 'pipe' })
         exited = false

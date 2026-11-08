@@ -1,4 +1,5 @@
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json }
+export type Harness = 'codex' | 'pi' | 'opencode'
 export type Status = 'running' | 'completed' | 'failed' | 'interrupted'
 export type Content = { type: 'text', text: string } | { type: 'image', mimeType: string, data: string } | { type: 'json', value: Json }
 export type TokenUsage = {
@@ -37,7 +38,7 @@ export type Turn = {
 }
 export type Environment = {
     id: string
-    harness: 'codex' | 'pi'
+    harness: Harness
     auth: string
     image: string
     status: 'creating' | 'ready' | 'running' | 'failed' | 'deleting' | 'interrupted'
@@ -58,7 +59,7 @@ export type EnvironmentHandle = {
 }
 export class Agents {
     constructor(url?: string)
-    create(options?: { harness?: 'codex' | 'pi', auth?: string, image?: string }): Promise<EnvironmentHandle>
+    create(options?: { harness?: Harness, auth?: string, image?: string }): Promise<EnvironmentHandle>
     environment(id: string): EnvironmentHandle
     list(): Promise<EnvironmentSummary[]>
     private request
