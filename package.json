@@ -11,6 +11,7 @@
     "typescript": "^7.0.2"
   },
   "dependencies": {
+    "@elysia/openapi": "^2.0.0-rc.1",
     "elysia": "^2.0.0-rc.3"
   },
   "scripts": {

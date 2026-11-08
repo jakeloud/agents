@@ -4,7 +4,7 @@ const agents = new Agents()
 const agent = await agents.create({ harness: 'codex' })
 
 try {
-    const first = await agent.send('Write a small Fibonacci program and run it.', {
+    const first = await agent.send('Write a small Fibonacci program in js and run it.', {
         model: 'gpt-6-luna'
     })
     console.log(first.text)
