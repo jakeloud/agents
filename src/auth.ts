@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
 import type { Harness } from '../sdk/index'
 
 const home = homedir()
@@ -72,8 +72,7 @@ export function resolveAuth(harness: Harness, profile = 'default') {
         if (!converted) continue
         const providers = Object.keys(converted)
         return { name, data: converted, destination: destinations[harness],
-            provider: providers.includes('openai') ? 'openai' : providers[0],
-            config: harness === 'codex' && source.harness === 'codex' ? join(dirname(source.file), 'config.toml') : undefined }
+            provider: providers.includes('openai') ? 'openai' : providers[0] }
     }
     return fail(profile === 'default' ? `No compatible credentials found for ${harness}. Checked its own auth file, then other harness auth files.` : `Auth profile ${profile} has no compatible credentials for ${harness}`)
 }

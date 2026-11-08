@@ -54,6 +54,8 @@ export class Run {
     events: AgentEvent[] = [{ type: 'status', status: 'running' }]
     usage: TokenUsage = { inputTokens: null, outputTokens: null, cachedInputTokens: null, cacheWriteInputTokens: null, reasoningOutputTokens: null }
     sessionId?: string
+    model: string | null = null
+    effort: string | null = null
     text = ''
     error?: string
     completed = false
@@ -121,8 +123,10 @@ export class Run {
 
     pi(event: any) {
         if (event.type === 'session') this.sessionId = event.id
+        if (event.type === 'thinking_level_changed') this.effort = event.level
         if (event.type === 'message_end' && event.message.role === 'assistant') {
             const message = event.message
+            this.model = message.model ?? this.model
             this.text = text(message.content)
             if (this.text) this.events.push({ type: 'message', text: this.text })
             for (const block of message.content) {

@@ -29,7 +29,8 @@ export type AgentEvent =
     | { type: 'status', status: Status }
 export type Turn = {
     message: string
-    model: string
+    model: string | null
+    effort: string | null
     status: Status
     text: string
     events: AgentEvent[]
@@ -54,7 +55,7 @@ export type EnvironmentState = Environment & { container: ContainerState }
 export type EnvironmentHandle = {
     id: string
     get(): Promise<EnvironmentState>
-    send(message: string, options: { model: string }): Promise<Turn>
+    send(message: string, options?: { model?: string }): Promise<Turn>
     delete(): Promise<void>
 }
 export class Agents {

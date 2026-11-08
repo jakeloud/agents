@@ -4,7 +4,7 @@ const agents = new Agents()
 const agent = await agents.create({ harness: 'opencode' })
 
 try {
-    const response = await agent.send('hi', { model: 'gpt-6-luna' })
+    const response = await agent.send('hi')
     console.log(response.text)
 } finally {
     await agent.delete()

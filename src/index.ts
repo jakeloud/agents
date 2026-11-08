@@ -2,8 +2,10 @@ import { Elysia } from 'elysia'
 import { docs, models, routes } from './api'
 import { Run } from './events'
 import { resolveAuth } from './auth'
+import { configuration, sessionMetadata } from './config'
 import type { Environment as PublicEnvironment, Harness, Turn } from '../sdk/index'
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { dirname } from 'node:path'
 
 const image = 'node:24-bookworm-slim'
 const file = 'environments.json'
@@ -25,6 +27,7 @@ const idle = (env: Environment) => {
 }
 
 for (const env of Object.values(environments)) {
+    for (const turn of env.thread.turns) turn.effort ??= null
     if (stored.version !== 2) for (const turn of env.thread.turns) {
         const run = new Run(env.harness)
         for (const event of turn.events) run.accept(event)
@@ -81,6 +84,7 @@ async function* events(stream: ReadableStream<Uint8Array>) {
 async function create(options: { harness?: Harness, auth?: string, image?: string }) {
     const harness = options.harness ?? 'codex'
     const auth = resolveAuth(harness, options.auth)
+    const config = configuration(harness)
     const env: Environment = {
         id: `agent-${crypto.randomUUID()}`, harness, auth: auth.name, provider: auth.provider,
         image: options.image ?? image, status: 'creating', thread: { id: null, turns: [] }
@@ -92,15 +96,18 @@ async function create(options: { harness?: Harness, auth?: string, image?: strin
             '--workdir', '/workspace', '--env', 'HOME=/root', '--env', 'CODEX_HOME=/root/.codex',
             '--env', 'PI_CODING_AGENT_DIR=/root/.pi/agent',
             '--env', 'XDG_DATA_HOME=/root/.local/share',
+            '--env', 'XDG_CONFIG_HOME=/root/.config', '--env', 'XDG_STATE_HOME=/root/.local/state',
+            ...config.env.flatMap(value => ['--env', value]),
             '--entrypoint', 'sleep', env.image, 'infinity'])
-        await docker(['exec', env.id, 'mkdir', '-p', '/root/.codex', '/root/.pi/agent', '/root/.local/share/opencode'])
+        await docker(['exec', env.id, 'mkdir', '-p', '/root/.codex', '/root/.pi/agent', '/root/.local/share/opencode',
+            ...config.files.map(([, target]) => dirname(target))])
         if (env.image === image) await docker(['exec', env.id, 'sh', '-c',
             'apt-get update && apt-get install -y --no-install-recommends ca-certificates git && rm -rf /var/lib/apt/lists/*'])
         await docker(['exec', env.id, 'sh', '-c', `npm install --global ${packages[harness]} && npm cache clean --force`])
         await docker(['exec', '-i', env.id, 'node', '-e',
             'require("node:fs").writeFileSync(process.argv[1], require("node:fs").readFileSync(0), { mode: 0o600 })', auth.destination],
             new Blob([JSON.stringify(auth.data)]))
-        if (auth.config && existsSync(auth.config)) await docker(['cp', auth.config, `${env.id}:/root/.codex/config.toml`])
+        for (const [source, target] of config.files) await docker(['cp', source, `${env.id}:${target}`])
         env.status = 'ready'
         save()
         return env
@@ -113,21 +120,22 @@ async function create(options: { harness?: Harness, auth?: string, image?: strin
     }
 }
 
-async function send(id: string, message: string, model: string) {
+async function send(id: string, message: string, model?: string) {
     const env = get(id)
     if (env.status !== 'ready') fail(409, `Environment is ${env.status}`)
     const run = new Run(env.harness)
-    const turn: Turn = { message, model, status: 'running', text: '', events: run.events, usage: run.usage }
+    const turn: Turn = { message, model: null, effort: null, status: 'running', text: '', events: run.events, usage: run.usage }
     env.thread.turns.push(turn)
     env.status = 'running'
     save()
     let exited = true
     try {
         const args = {
-            pi: ['pi', '--mode', 'json', '--session-id', env.id, '--model', model],
+            pi: ['pi', '--mode', 'json', '--session-id', env.id, ...(model ? ['--model', model] : [])],
             codex: ['codex', 'exec', ...(env.thread.id ? ['resume', env.thread.id] : []),
-                '--json', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', '-c', 'cli_auth_credentials_store="file"', '--model', model, '-'],
-            opencode: ['opencode', 'run', '--format', 'json', '--thinking', '--auto', '--model', model.includes('/') ? model : `${env.provider ?? 'openai'}/${model}`,
+                '--json', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', '-c', 'cli_auth_credentials_store="file"', ...(model ? ['--model', model] : []), '-'],
+            opencode: ['opencode', 'run', '--format', 'json', '--thinking', '--auto',
+                ...(model ? ['--model', model.includes('/') ? model : `${env.provider ?? 'openai'}/${model}`] : []),
                 ...(env.thread.id ? ['--session', env.thread.id] : [])]
         }[env.harness]
         const proc = Bun.spawn(['docker', 'exec', '-i', env.id, ...args],
@@ -138,12 +146,26 @@ async function send(id: string, message: string, model: string) {
             run.accept(event)
             if (run.sessionId) env.thread.id = run.sessionId
             turn.text = run.text
+            turn.model = run.model
+            turn.effort = run.effort
             save()
         }
         const [code, err] = await Promise.all([proc.exited, stderr])
         exited = true
         if (code || run.error || !run.completed) {
             fail(502, run.error || err.trim() || 'Agent exited without completing the turn')
+        }
+        if (run.sessionId) {
+            if (env.harness === 'opencode') {
+                const session = JSON.parse(await docker(['exec', env.id, 'opencode', 'export', run.sessionId]))
+                const info = session.messages.findLast((entry: any) => entry.info.role === 'assistant')?.info
+                turn.model = info?.modelID ?? null
+                turn.effort = info?.variant ?? null
+            } else {
+                const selected = JSON.parse(await docker(['exec', env.id, 'node', '-e', sessionMetadata, env.harness, run.sessionId]))
+                turn.model = selected.model ?? run.model
+                turn.effort = selected.effort ?? run.effort
+            }
         }
         turn.status = 'completed'
         return turn
@@ -196,7 +218,7 @@ new Elysia()
             throw error
         }
     })
-    .listen({ hostname: '127.0.0.1', port: 3000, idleTimeout: 0 })
+    .listen({ hostname: '127.0.0.1', port: 8910, idleTimeout: 0 })
 
-console.log('Agents: http://127.0.0.1:3000')
-console.log('API docs: http://127.0.0.1:3000/openapi')
+console.log('Agents: http://127.0.0.1:8910')
+console.log('API docs: http://127.0.0.1:8910/openapi')

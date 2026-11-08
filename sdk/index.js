@@ -1,5 +1,5 @@
 export class Agents {
-    constructor(url = 'http://127.0.0.1:3000') {
+    constructor(url = 'http://127.0.0.1:8910') {
         this.url = url.replace(/\/$/, '')
     }
 
@@ -20,7 +20,7 @@ export class Agents {
         return {
             id,
             get: () => this.request('GET', path),
-            send: (message, { model }) => this.request('POST', `${path}/messages`, { message, model }),
+            send: (message, { model } = {}) => this.request('POST', `${path}/messages`, { message, model }),
             delete: () => this.request('DELETE', path)
         }
     }

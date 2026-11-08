@@ -8,12 +8,13 @@ const harness = t.Union([t.Literal('codex'), t.Literal('pi'), t.Literal('opencod
 const auth = t.String({ minLength: 1, description: '"default" prefers the harness’s own auth file, then compatible files in codex, pi, opencode order. Missing, invalid and incompatible files are skipped. An explicit profile name pins the source without fallback. Profiles and native paths are defined in src/auth.ts. Responses report the selected source.', examples: ['default', 'codex', 'pi', 'opencode'] })
 const image = t.String({ minLength: 1, description: 'Docker base image. Custom images need Linux, Node/npm, sleep, shell utilities and CA certificates.', examples: ['node:24-bookworm-slim'] })
 const message = t.String({ minLength: 1, description: 'User message sent to the environment’s conversation.', examples: ['Write a small Fibonacci program and run it.'] })
-const model = t.String({ minLength: 1, description: 'Model ID for this message. Required on every send; changing it keeps the same conversation.', examples: ['gpt-6-luna'] })
+const model = t.String({ minLength: 1, description: 'Optional model override for this message. Omit to use the harness’s native configuration and session defaults, including configured effort. Changing the model keeps the same conversation.', examples: ['gpt-6-luna'] })
 const params = t.Object({ id })
 
 const turn = t.Object({
     message,
-    model,
+    model: t.Nullable(t.String(), { description: 'Actual model selected for this turn. Null until reported by the harness or its session.' }),
+    effort: t.Nullable(t.String(), { description: 'Selected reasoning effort or variant reported by the session. Null when unavailable.' }),
     status: t.String({ enum: ['running', 'completed', 'failed', 'interrupted'], description: 'running: harness executing; completed: successful terminal event and process exit; failed: invocation or model failure; interrupted: server stopped during execution.' }),
     text: t.String({ description: 'Latest completed assistant message as plain text. Empty before a message completes.' }),
     events: t.Array(t.Ref('Event'), { description: 'SDK events in arrival order. Switch on type to read the corresponding documented fields. Tool snapshots replace earlier snapshots with the same id; usage and plan events replace previous totals and plans. Poll get to see progress.' }),
@@ -22,7 +23,7 @@ const turn = t.Object({
 }, {
     additionalProperties: false,
     description: 'One user message and the work performed in response. Send returns a completed turn; get also exposes running and failed turns.',
-    examples: [{ message: 'Say hello.', model: 'gpt-6-luna', status: 'completed', text: 'Hello!', usage: { inputTokens: 100, outputTokens: 3, cachedInputTokens: 0, cacheWriteInputTokens: null, reasoningOutputTokens: null }, events: [{ type: 'status', status: 'running' }, { type: 'message', text: 'Hello!' }, { type: 'status', status: 'completed' }] }]
+    examples: [{ message: 'Say hello.', model: 'gpt-6-luna', effort: null, status: 'completed', text: 'Hello!', usage: { inputTokens: 100, outputTokens: 3, cachedInputTokens: 0, cacheWriteInputTokens: null, reasoningOutputTokens: null }, events: [{ type: 'status', status: 'running' }, { type: 'message', text: 'Hello!' }, { type: 'status', status: 'completed' }] }]
 })
 
 const environmentFields = {
@@ -62,7 +63,7 @@ const createBody = t.Object({
 export const models = {
     ...eventModels,
     CreateEnvironment: createBody,
-    SendMessage: t.Object({ message, model }, { description: 'Send a user message and explicitly select its model.' }),
+    SendMessage: t.Object({ message, model: t.Optional(model) }, { description: 'Send a user message using native model and effort defaults, with an optional model override.' }),
     Turn: turn,
     Environment: environment,
     Environments: t.Array(t.Object({
@@ -91,7 +92,7 @@ export const routes = {
         body: createBody,
         detail: {
             operationId: 'createEnvironment', summary: 'Create an environment',
-            description: 'Creates a container, installs the selected agent and copies the chosen credentials. Waits until the environment is ready. The first message starts its conversation; thread.id is initially null.',
+            description: 'Creates a container, installs the selected agent and copies the chosen credentials and the harness’s local configuration. Configuration comes from the selected harness independently of the auth source and is captured at creation. Waits until the environment is ready. The first message starts its conversation; thread.id is initially null.',
             responses: { 201: json('Environment', 'Environment provisioned and ready for its first message.'), 400: errors[400], 422: errors[422], 500: errors[500], 502: errors[502] }
         }
     },
@@ -113,8 +114,8 @@ export const routes = {
     send: {
         params, body: models.SendMessage,
         detail: {
-            operationId: 'sendMessage', summary: 'Send a message and select its model',
-            description: 'Creates or resumes the environment’s single thread and runs one message using the requested model. Waits for the harness to exit; this response is not a stream. Successful calls return the completed turn. Failures return an error and remain visible in get. Only one message may run per environment. Different environments can run concurrently.',
+            operationId: 'sendMessage', summary: 'Send a message',
+            description: 'Creates or resumes the environment’s single thread. Omit model to use native configuration and session defaults; provide model to override it for this message. Configured effort is preserved. Waits for the harness to exit; this response is not a stream. Successful calls return the completed turn and selected model. Failures return an error and remain visible in get. Only one message may run per environment. Different environments can run concurrently.',
             responses: { 200: json('Turn', 'Completed turn with assistant text, SDK events and token totals.'), 400: errors[400], 404: errors[404], 409: errors[409], 422: errors[422], 500: errors[500], 502: errors[502] }
         }
     },
@@ -130,7 +131,7 @@ export const routes = {
 
 export const docs = openapi({
     documentation: {
-        info: { title: 'Agents API', version: '0.2.0', description: 'Create an environment, save its id, then send messages. Every message chooses a model and returns the same SDK event types: message, reasoning, tool, plan, usage, error and status.' },
-        servers: [{ url: 'http://127.0.0.1:3000', description: 'Local server, or remote server reached through an SSH tunnel.' }]
+        info: { title: 'Agents API', version: '0.2.0', description: 'Create an environment, save its id, then send messages. Model and effort default to the harness’s native configuration. Every message returns the same SDK event types: message, reasoning, tool, plan, usage, error and status.' },
+        servers: [{ url: 'http://127.0.0.1:8910', description: 'Local server, or remote server reached through an SSH tunnel.' }]
     }
 })
