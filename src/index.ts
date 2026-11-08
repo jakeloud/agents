@@ -1,4 +1,5 @@
-import { Elysia, t } from 'elysia'
+import { Elysia } from 'elysia'
+import { docs, models, routes } from './api'
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -189,29 +190,23 @@ async function send(id: string, message: string, model: string) {
 }
 
 new Elysia()
+    .model(models)
+    .use(docs)
     .onError(({ error, set }) => {
         set.status = error instanceof Error && 'status' in error && typeof error.status === 'number' ? error.status : 500
         return { error: error instanceof Error ? error.message : String(error) }
     })
-    .post('/environments', {
-        body: t.Object({
-            harness: t.Optional(t.Union([t.Literal('codex'), t.Literal('pi')])),
-            auth: t.Optional(t.String({ minLength: 1 })),
-            image: t.Optional(t.String({ minLength: 1 }))
-        })
-    }, async ({ body, set }) => {
+    .post('/environments', routes.create, async ({ body, set }) => {
         const env = await create(body)
         set.status = 201
         return env
     })
-    .get('/environments', () => Object.values(environments).map(({ thread, ...env }) => ({ ...env, threadId: thread.id })))
-    .get('/environments/:id', async ({ params: { id } }) => ({
+    .get('/environments', routes.list, () => Object.values(environments).map(({ thread, ...env }) => ({ ...env, threadId: thread.id })))
+    .get('/environments/:id', routes.get, async ({ params: { id } }) => ({
         ...get(id), container: JSON.parse(await docker(['inspect', '--format', '{{json .State}}', id]))
     }))
-    .post('/environments/:id/messages', {
-        body: t.Object({ message: t.String({ minLength: 1 }), model: t.String({ minLength: 1 }) })
-    }, ({ params: { id }, body }) => send(id, body.message, body.model))
-    .delete('/environments/:id', async ({ params: { id }, set }) => {
+    .post('/environments/:id/messages', routes.send, ({ params: { id }, body }) => send(id, body.message, body.model))
+    .delete('/environments/:id', routes.delete, async ({ params: { id }, set }) => {
         const env = get(id)
         idle(env)
         const previous = env.status
@@ -229,3 +224,4 @@ new Elysia()
     .listen({ hostname: '127.0.0.1', port: 3000, idleTimeout: 0 })
 
 console.log('Agents: http://127.0.0.1:3000')
+console.log('API docs: http://127.0.0.1:3000/openapi')
